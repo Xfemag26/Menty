@@ -1,0 +1,6 @@
+/target/
+**/.kombai/
+*.db
+*.gguf
+*.bin
+.env

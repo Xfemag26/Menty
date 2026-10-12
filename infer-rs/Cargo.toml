@@ -1,0 +1,18 @@
+[package]
+name = "infer-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+memmap2 = "0.9"
+rayon = "1.12"
+half = "2.7"
+bytemuck = "1.25"
+regex = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
