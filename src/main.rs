@@ -24,6 +24,12 @@ use memory::Memory;
 use reflection::{new_activity_tracker, record_activity, start_reflection_loop, LastActivityTs};
 use tools::dispatch_with_memory;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppMode {
+    AiChat,
+    ServerConnect,
+}
+
 #[derive(Clone)]
 struct ChatMessage {
     role: String, // "user" | "assistant" | "system" | "tool"
@@ -32,6 +38,9 @@ struct ChatMessage {
 }
 
 struct MomentumApp {
+    app_mode: AppMode,
+    remote_url: String,
+    remote_api_key: String,
     messages: Vec<ChatMessage>,
     input_text: String,
     memory: Arc<Mutex<Memory>>,
@@ -100,6 +109,9 @@ impl MomentumApp {
             .map(GpuStatus::is_constrained)
             .unwrap_or(false);
         let mut app = Self {
+            app_mode: AppMode::AiChat,
+            remote_url: String::new(),
+            remote_api_key: String::new(),
             messages: vec![ChatMessage {
                 role: "system".into(),
                 content: format!(
@@ -706,97 +718,76 @@ impl eframe::App for MomentumApp {
             self.last_alert = Some(alert);
         }
 
-        // Top panel: Status / Guardian bar + model switcher dropdown
+        // Top panel: Logo dropdown menu + status/model switcher or server connect mode
         egui::TopBottomPanel::top("top_panel")
             .frame(
                 egui::Frame::none()
-                    .inner_margin(egui::Margin::symmetric(12.0, 8.0))
-                    .fill(egui::Color32::from_rgb(18, 18, 24)),
+                    .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+                    .fill(egui::Color32::from_rgb(13, 17, 23)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.heading("🌊 Ghostwater");
-                    if let Some(gpu) = &self.gpu_status {
-                        if let Some(name) = gpu.device_name.as_deref() {
-                            let tint = if gpu.loaded_layers < gpu.target_layers {
-                                egui::Color32::YELLOW
-                            } else {
-                                egui::Color32::LIGHT_GREEN
-                            };
-                            ui.colored_label(
-                                tint,
-                                format!(
-                                    "GPU {} · {}/{} layers · {} MiB free",
-                                    name, gpu.loaded_layers, gpu.target_layers, gpu.free_mb
-                                ),
-                            );
-                        } else if let Some(reason) = gpu.failure_reason.as_deref() {
-                            ui.weak(format!("CPU fallback · {reason}"));
-                        }
-                    }
-
-                    // Model switcher dropdown — zero inference cost, pure UI
-                    let current_name = config::MODEL_PROFILES[self.active_model_idx].name;
-                    egui::ComboBox::from_id_salt("model_selector")
-                        .selected_text(current_name)
+                    let mode_text = match self.app_mode {
+                        AppMode::AiChat => "🌊 Ghostwater (AI Chat)",
+                        AppMode::ServerConnect => "🌐 Connect to Servers",
+                    };
+                    egui::ComboBox::from_id_salt("logo_mode_dropdown")
+                        .selected_text(mode_text)
                         .show_ui(ui, |ui| {
-                            // Read RAM once per frame from the cache, not once per profile.
-                            // Avoids N /proc/meminfo reads inside a tight repaint loop.
-                            let frame_free_gb = self
-                                .hw_cache
-                                .lock()
-                                .map(|g| (g.ram_total_gb - g.ram_used_gb).max(0.0))
-                                .unwrap_or(4.0);
-                            for (i, profile) in config::MODEL_PROFILES.iter().enumerate() {
-                                // Resource warning colour — uses cached value, zero /proc reads here.
-                                let ram_ok = frame_free_gb >= profile.ram_warn_gb;
-                                let label = if ram_ok {
-                                    profile.name.to_string()
-                                } else {
-                                    format!("⚠️ {}", profile.name)
-                                };
-                                let is_active = i == self.active_model_idx;
-                                if ui
-                                    .selectable_label(is_active, &label)
-                                    .on_hover_text(profile.description)
-                                    .clicked()
-                                    && !is_active
-                                {
-                                    // Switch immediately — no Enter required.
-                                    // We can't call self.switch_model() inside the ComboBox
-                                    // closure (borrow conflict), so we set a sentinel in
-                                    // input_text and send it programmatically after the panel.
-                                    self.input_text = format!("/model {}", i);
-                                    ctx.request_repaint();
-                                }
-                            }
+                            ui.selectable_value(&mut self.app_mode, AppMode::AiChat, "🌊 Ghostwater (AI Chat)");
+                            ui.selectable_value(&mut self.app_mode, AppMode::ServerConnect, "🌐 Connect to Servers");
                         });
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(ref alert) = self.last_alert {
-                            let color = if alert.is_emergency || alert.is_critical {
-                                egui::Color32::RED
-                            } else if alert.ram_percent > RAM_WARN_PERCENT {
-                                egui::Color32::YELLOW
-                            } else {
-                                egui::Color32::GREEN
-                            };
-                            let mode = alert.perf_mode.label();
-                            ui.colored_label(
-                                color,
-                                format!(
-                                    "{} RAM:{:.0}% CPU:{:.0}% ({:.1}/{:.1}GB)",
-                                    mode,
-                                    alert.ram_percent,
-                                    alert.cpu_percent,
-                                    alert.used_gb,
-                                    alert.total_gb
-                                ),
-                            );
-                        } else {
-                            ui.label("RAM: --");
+                    ui.separator();
+
+                    if self.app_mode == AppMode::AiChat {
+                        if let Some(gpu) = &self.gpu_status {
+                            if let Some(name) = gpu.device_name.as_deref() {
+                                let tint = if gpu.loaded_layers < gpu.target_layers {
+                                    egui::Color32::YELLOW
+                                } else {
+                                    egui::Color32::LIGHT_GREEN
+                                };
+                                ui.colored_label(
+                                    tint,
+                                    format!("GPU {} · {}/{} layers", name, gpu.loaded_layers, gpu.target_layers),
+                                );
+                            } else if let Some(reason) = gpu.failure_reason.as_deref() {
+                                ui.weak(format!("CPU fallback · {reason}"));
+                            }
                         }
-                    });
+
+                        let current_name = config::MODEL_PROFILES[self.active_model_idx].name;
+                        egui::ComboBox::from_id_salt("model_selector")
+                            .selected_text(current_name)
+                            .show_ui(ui, |ui| {
+                                let frame_free_gb = self
+                                    .hw_cache
+                                    .lock()
+                                    .map(|g| (g.ram_total_gb - g.ram_used_gb).max(0.0))
+                                    .unwrap_or(4.0);
+                                for (i, profile) in config::MODEL_PROFILES.iter().enumerate() {
+                                    let ram_ok = frame_free_gb >= profile.ram_warn_gb;
+                                    let label = if ram_ok {
+                                        profile.name.to_string()
+                                    } else {
+                                        format!("⚠️ {}", profile.name)
+                                    };
+                                    let is_active = i == self.active_model_idx;
+                                    if ui
+                                        .selectable_label(is_active, &label)
+                                        .on_hover_text(profile.description)
+                                        .clicked()
+                                        && !is_active
+                                    {
+                                        self.input_text = format!("/model {}", i);
+                                        ctx.request_repaint();
+                                    }
+                                }
+                            });
+                    } else {
+                        ui.weak("Configure remote servers (Kaggle / Colab ngrok / Omniroute)");
+                    }
                 });
             });
 
@@ -945,50 +936,81 @@ impl eframe::App for MomentumApp {
                 });
             });
 
-        // Central panel: Chat history
+        // Central panel: Chat history or Server Connection panel
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false; 2])
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for msg in &self.messages {
-                        egui::Frame::group(ui.style())
-                            .fill(egui::Color32::from_rgb(30, 30, 40))
-                            .rounding(8.0)
-                            .inner_margin(8.0)
-                            .show(ui, |ui| {
-                                let (badge, color) = match msg.role.as_str() {
-                                    "user" => ("👤 You", egui::Color32::LIGHT_BLUE),
-                                    "assistant" => {
-                                        ("🌊 Ghostwater", egui::Color32::from_rgb(100, 220, 180))
-                                    }
-                                    "system" => ("⚙️ System", egui::Color32::GRAY),
-                                    _ => ("🛠️ Tool", egui::Color32::GOLD),
+            match self.app_mode {
+                AppMode::AiChat => {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false; 2])
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for msg in &self.messages {
+                                let (fill_color, border_color) = match msg.role.as_str() {
+                                    "user" => (egui::Color32::from_rgb(22, 27, 34), egui::Color32::from_rgb(48, 54, 61)),
+                                    "assistant" => (egui::Color32::from_rgb(22, 27, 34), egui::Color32::from_rgb(88, 166, 255)),
+                                    _ => (egui::Color32::from_rgb(22, 27, 34), egui::Color32::from_rgb(110, 118, 129)),
                                 };
-                                ui.horizontal(|ui| {
-                                    ui.colored_label(color, badge);
-                                    if !msg.time.is_empty() {
-                                        ui.weak(&msg.time);
-                                    }
-                                });
-                                ui.label(&msg.content);
-                            });
-                        ui.add_space(4.0);
-                    }
+                                egui::Frame::none()
+                                    .fill(fill_color)
+                                    .stroke(egui::Stroke::new(1.0_f32, border_color))
+                                    .rounding(6.0)
+                                    .inner_margin(12.0)
+                                    .show(ui, |ui| {
+                                        let (badge, color) = match msg.role.as_str() {
+                                            "user" => ("👤 You", egui::Color32::from_rgb(88, 166, 255)),
+                                            "assistant" => ("🌊 Ghostwater", egui::Color32::from_rgb(35, 134, 54)),
+                                            "system" => ("⚙️ System", egui::Color32::from_rgb(139, 148, 158)),
+                                            _ => ("🛠️ Tool", egui::Color32::from_rgb(210, 153, 34)),
+                                        };
+                                        ui.horizontal(|ui| {
+                                            ui.colored_label(color, badge);
+                                            if !msg.time.is_empty() { ui.weak(&msg.time); }
+                                        });
+                                        ui.add_space(4.0);
+                                        ui.label(&msg.content);
+                                    });
+                                ui.add_space(8.0);
+                            }
 
-                    if self.is_generating {
-                        egui::Frame::group(ui.style())
-                            .fill(egui::Color32::from_rgb(30, 30, 40))
-                            .rounding(8.0)
-                            .inner_margin(8.0)
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spinner();
-                                    ui.weak("Ghostwater is reflecting / generating...");
-                                });
-                            });
+                            if self.is_generating {
+                                egui::Frame::none()
+                                    .fill(egui::Color32::from_rgb(22, 27, 34))
+                                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(88, 166, 255)))
+                                    .rounding(6.0)
+                                    .inner_margin(12.0)
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.spinner();
+                                            ui.weak("Ghostwater is generating...");
+                                        });
+                                    });
+                            }
+                        });
+                }
+                AppMode::ServerConnect => {
+                    ui.add_space(20.0);
+                    ui.heading("🌐 Connect Remote GPU Servers");
+                    ui.weak("Connect Kaggle, Colab (ngrok), Omniroute, or OpenAI-compatible servers.");
+                    ui.add_space(16.0);
+                    ui.label("Endpoint URL:");
+                    ui.add(egui::TextEdit::singleline(&mut self.remote_url).hint_text("https://xxxx.ngrok-free.app/v1"));
+                    ui.add_space(10.0);
+                    ui.label("API Key / Token:");
+                    ui.add(egui::TextEdit::singleline(&mut self.remote_api_key).password(true));
+                    ui.add_space(16.0);
+                    if ui.button("Test Connection").clicked() {
+                        let url = self.remote_url.clone();
+                        let tx = self.chat_tx.clone();
+                        self.tokio_runtime.spawn(async move {
+                            let client = ureq::Agent::new_with_defaults();
+                            match client.get(&format!("{}/models", url.trim_end_matches('/'))).call() {
+                                Ok(_) => { let _ = tx.send(ChatMessage { role: "system".into(), content: format!("✅ Connected to {}", url), time: Local::now().format("%H:%M").to_string() }); }
+                                Err(e) => { let _ = tx.send(ChatMessage { role: "system".into(), content: format!("❌ Connection failed: {}", e), time: Local::now().format("%H:%M").to_string() }); }
+                            }
+                        });
                     }
-                });
+                }
+            }
         });
 
         // Auto-dispatch model switch commands written by the ComboBox closure.

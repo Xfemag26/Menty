@@ -232,8 +232,6 @@ pub fn python_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("python3"))
 }
 pub const N_THREADS: u32 = 3; // 4 physical cores on i7-8550U; leaves HTs for OS/GUI
-pub const MAX_TOKENS: u32 = 256;
-pub const TEMPERATURE: f32 = 0.75;
 
 // Guardian thresholds — adaptive two-tier
 // Lightweight fast poll (5s) watches for 95% emergency, heavy adaptive poll (300s) tunes mode.
@@ -252,8 +250,7 @@ pub const CPU_TEMP_CRITICAL_C: f32 = 95.0;
 
 // Memory / reflection
 pub const MAX_HISTORY_TURNS: usize = 4; // fewer turns = smaller prompt = less RAM
-pub const REFLECTION_BUDGET: usize = 1; // only 1 puzzle per idle cycle
-                                        // Reflection only runs when the machine is genuinely idle (user away 5 min)
+// Reflection only runs when the machine is genuinely idle (user away 5 min)
 pub const REFLECTION_IDLE_SECS: u64 = 300;
 pub const PRUNE_INTERVAL_SECS: u64 = 86400;
 
@@ -296,7 +293,6 @@ pub const GRAPH_MIN_EDGE_STRENGTH: f32 = 0.35;
 // Memory SSD pocket — overflow/archive + lean context window
 pub const MEMORY_ARCHIVE_MAX_MB: u64 = 512; // cap archive DB size on SSD
 pub const CONTEXT_MAX_CHARS: usize = 1600; // fits inside 2048 ctx with PERSONA+history+response
-pub const CONTEXT_MAX_SESSIONS: usize = 20; // recent sessions to consider after archiving
                                             // Ghostwater persona — split so tool docs are only injected when the query
                                             // looks tool-like, saving ~200 tokens on plain conversation turns.
                                             //
