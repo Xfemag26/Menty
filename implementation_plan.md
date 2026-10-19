@@ -1,25 +1,34 @@
 # Implementation Plan
 
-## Overview
-Wire `ServerConnect` mode into real OpenAI-compatible remote chat completion proxying, and clean up confirmed unused constants and unread fields across the codebase.
+[Overview]
+Update `momentum/src/llm.rs` to add robust local inference features: async prefetch and layer warmup, batch generation API (`complete_batch` and `complete_stream_batch`), safer model path handling, and robust memory-only warmup/prompt fallback support matching the requested architecture.
 
-## Types
-- Clean up unread fields in `GuardianAlert` in `src/guardian.rs` if safe.
+[Types]
+- `GpuStatus`: Existing struct retained and validated.
+- `InferenceRuntime`: Existing struct retained and validated.
+- `LoadedModel`: Existing struct retained.
+- `PREFETCH_TASK`: Added `OnceLock<Mutex<Option<JoinHandle<()>>>>` to manage async prefetch tasks safely without blocking.
 
-## Files
-- `/home/mehtculos-xfemag/AI_project/momentum/src/config.rs`: Remove unused constants (`MAX_TOKENS`, `TEMPERATURE`, `REFLECTION_BUDGET`, `CONTEXT_MAX_SESSIONS`, `PERSONA`).
-- `/home/mehtculos-xfemag/AI_project/momentum/src/main.rs`: Implement remote chat request forwarding via `ureq` when `AppMode::ServerConnect` is selected.
+[Files]
+- `/home/mehtculos-xfemag/AI_project/momentum/src/llm.rs`: Replaced with the complete enhanced implementation containing async prefetch, prewarm, batch generation APIs, and robust model loading/fallback.
 
-## Functions
-- `send_message` in `src/main.rs`: Add branch for `AppMode::ServerConnect` to invoke remote endpoint (`/chat/completions`) and receive assistant responses.
+[Functions]
+- `async_prefetch_model(model_path: &str)`: Spawns non-blocking file access task to prefetch model weights.
+- `async_prewarm_server()`: Spawns non-blocking warmup task.
+- `complete_batch(prompts: &[String], max_tokens: u32) -> anyhow::Result<Vec<String>>`: Batch inference utility.
+- `complete_stream_batch(prompts: &[String], max_tokens: u32, mut on_token: impl FnMut(&str)) -> anyhow::Result<Vec<String>>`: Batch streaming inference utility.
+- Existing `complete`, `complete_stream`, `embed_text`, `cosine_sim` retained and fully functional.
 
-## Dependencies
-- None added (reusing `ureq` already present).
+[Classes]
+- None new; existing structures updated.
 
-## Testing
-- Run `cargo test --workspace` to ensure successful compilation and test pass.
+[Dependencies]
+- Existing dependencies (`infer-rs`, `tokio`, `anyhow`) in `Cargo.toml`.
 
-## Implementation Order
-1. Remove unused constants in `src/config.rs`.
-2. Add remote chat forwarding logic for `ServerConnect` in `src/main.rs`.
-3. Run `cargo test --workspace`.
+[Testing]
+- Run `cargo check` and `cargo test` to ensure successful compilation and test suites pass.
+
+[Implementation Order]
+1. Write the updated `momentum/src/llm.rs` using the editor tool.
+2. Run `cargo check` and `cargo test` to verify compilation and correctness.
+
