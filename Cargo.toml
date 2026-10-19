@@ -25,10 +25,16 @@ anyhow = "1"
 libc = "0.2"
 regex = { version = "1.10", default-features = false, features = ["std", "perf", "unicode-case"] }
 infer-rs = { path = "../infer-rs" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+csv = "1.2"
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
 

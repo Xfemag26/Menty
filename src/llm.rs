@@ -7,6 +7,10 @@ use infer_rs::model::TransformerModel;
 use infer_rs::tokenizer::Tokenizer;
 use std::sync::{Mutex, OnceLock};
 use tokio::task::JoinHandle;
+use std::time::Instant;
+use std::fs::OpenOptions;
+use std::io::Write;
+
 
 const GPU_RESERVE_MB: usize = 192;
 
@@ -236,7 +240,11 @@ pub fn complete_stream(
         .as_mut()
         .ok_or_else(|| anyhow::anyhow!("No model loaded in engine"))?;
 
+    let t_tokenize_start = Instant::now();
     let token_ids = engine.tokenizer.encode(prompt);
+    let tokenize_ms = t_tokenize_start.elapsed().as_millis();
+    crate::telemetry::log_stage_done("inference", "tokenize", tokenize_ms);
+
     if token_ids.is_empty() {
         return Ok(String::new());
     }
@@ -266,13 +274,17 @@ pub fn complete_stream(
     let tokenizer = &engine.tokenizer;
     let cuda = &mut engine.cuda;
 
+    let t_prefill = Instant::now();
     for (position, &token) in token_ids.iter().enumerate() {
         model.forward_with_cuda(token, position, &mut kv_cache, &mut logits, cuda.as_mut())
             .map_err(|e| anyhow::anyhow!("Prompt prefill failed: {e}"))?;
     }
+    let prefill_ms = t_prefill.elapsed().as_millis();
+    crate::telemetry::log_stage_done("inference", "prefill", prefill_ms);
 
     let mut generated_tokens = Vec::new();
     let mut shown = String::new();
+    let generation_start = Instant::now();
 
     for generated in 0..output_budget {
         let (token, score) = logits
@@ -314,7 +326,21 @@ pub fn complete_stream(
         }
     }
 
-    Ok(tokenizer.decode_tokens(&generated_tokens).trim().to_string())
+    let gen_ms = generation_start.elapsed().as_millis();
+    let _ = (|| -> anyhow::Result<()> {
+        let mut f = OpenOptions::new().create(true).append(true).open("/tmp/inference_profile.csv")?;
+        writeln!(f, "{},{},{},{}", chrono::Utc::now().to_rfc3339(), token_ids.len(), generated_tokens.len(), gen_ms)?;
+        Ok(())
+    })();
+
+    let result_text = tokenizer.decode_tokens(&generated_tokens).trim().to_string();
+    let _ = std::fs::write("/tmp/bench_out.json", serde_json::json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "prompt_tokens": token_ids.len(),
+        "generated_tokens": generated_tokens.len(),
+        "output_len": result_text.len(),
+    }).to_string());
+    Ok(result_text)
 }
 
 pub fn complete_batch(

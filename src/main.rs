@@ -1,12 +1,14 @@
 // main.rs - egui UI + conversation loop + process lifecycle
 // Replaces: harness.py, assistat.py, run_momentum.sh
 
+mod action_log;
 mod config;
 mod guardian;
 mod llm;
 mod memory;
 mod permissions;
 mod reflection;
+mod telemetry;
 mod tools;
 
 use chrono::Local;
@@ -1029,7 +1031,61 @@ impl eframe::App for MomentumApp {
 }
 
 fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--bench") {
+        let mut profile_arg = "0";
+        let mut prompt_file = "prompts/example1.txt";
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--profile" && i + 1 < args.len() {
+                profile_arg = &args[i + 1];
+            }
+            if args[i] == "--prompt-file" && i + 1 < args.len() {
+                prompt_file = &args[i + 1];
+            }
+            i += 1;
+        }
+
+        let _ = telemetry::init();
+        let _runtime = if let Ok(idx) = profile_arg.parse::<usize>() {
+            if idx < config::MODEL_PROFILES.len() {
+                let profile = &config::MODEL_PROFILES[idx];
+                InferenceRuntime::start_with_profile(profile)?
+            } else {
+                InferenceRuntime::start()?
+            }
+        } else {
+            if let Some(pos) = config::MODEL_PROFILES.iter().position(|pf| pf.name.to_lowercase().contains(&profile_arg.to_lowercase())) {
+                let profile = &config::MODEL_PROFILES[pos];
+                InferenceRuntime::start_with_profile(profile)?
+            } else {
+                InferenceRuntime::start()?
+            }
+        };
+
+        let prompt = std::fs::read_to_string(prompt_file).unwrap_or_else(|_| "Hello momentum".to_string());
+        let start = std::time::Instant::now();
+        let mut token_count = 0usize;
+        let out = llm::complete_stream(&prompt, 256, |piece| {
+            token_count += piece.chars().count();
+        })?;
+        let elapsed = start.elapsed();
+        let summary = serde_json::json!({
+            "elapsed_ms": elapsed.as_millis(),
+            "tokens": token_count,
+            "output_len": out.len(),
+            "profile": profile_arg,
+        });
+        std::fs::write("/tmp/bench_out.json", summary.to_string())?;
+        println!("{}", summary.to_string());
+        return Ok(());
+    }
+
     std::env::set_var("RAYON_NUM_THREADS", "4");
+    let _ = telemetry::init();
+    if let Ok(log) = action_log::ActionLog::open() {
+        let _ = log.remove_done();
+    }
     // Keep async orchestration lean; the native inference engine is serialized
     // through its mutex and runs the CPU/GPU kernels synchronously.
     let rt = tokio::runtime::Builder::new_multi_thread()

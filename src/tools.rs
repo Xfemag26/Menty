@@ -1142,7 +1142,23 @@ pub fn dispatch(tag: &str) -> Option<ToolResult> {
     let args: Vec<&str> = parts[1..].iter().map(String::as_str).collect();
     let verdict = Policy::default().check(name, args.first().copied());
     if verdict.risk == ToolRisk::Denied {
+        audit(name, tag, "denied");
+        crate::telemetry::log_tool_dispatch(name, "denied");
         return Some(ToolResult::err(format!("denied: {}", verdict.reason)));
+    }
+    if verdict.needs_confirm {
+        match queue_pending(name, tag) {
+            Ok(id) => {
+                crate::telemetry::log_tool_dispatch(name, "pending");
+                return Some(ToolResult::err(format!("Action queued for approval: {id}")));
+            }
+            Err(e) => {
+                crate::telemetry::log_tool_failure(name, &e.to_string());
+                return Some(ToolResult::err(format!(
+                    "confirm required but action log unavailable: {e}"
+                )));
+            }
+        }
     }
     let result = match name {
         "search_web" => search_web(args.first().copied().unwrap_or("")),
@@ -1180,7 +1196,24 @@ pub fn dispatch(tag: &str) -> Option<ToolResult> {
         "notify" => notify(args.first().copied().unwrap_or(""), args.get(1).copied().unwrap_or(""), args.get(2).copied().unwrap_or("")),
         _ => ToolResult::err(format!("Unknown tool: {name}. Use one of the documented file, desktop, web, memory, Blender, audio or media tools.")),
     };
+    audit(name, tag, "executed");
+    if result.error.is_some() {
+        crate::telemetry::log_tool_dispatch(name, "error");
+        crate::telemetry::log_tool_failure(name, &result.output);
+    } else {
+        crate::telemetry::log_tool_dispatch(name, "ok");
+    }
     Some(result)
+}
+
+fn audit(tool: &str, args: &str, status: &str) {
+    if let Ok(log) = crate::action_log::ActionLog::open() {
+        let _ = log.insert_with_status(tool, args, status);
+    }
+}
+
+fn queue_pending(tool: &str, args: &str) -> anyhow::Result<String> {
+    crate::action_log::ActionLog::open()?.insert_pending(tool, args)
 }
 
 pub async fn dispatch_with_memory(tag: &str, mem: &Arc<Mutex<Memory>>) -> Option<ToolResult> {
@@ -1194,6 +1227,13 @@ pub async fn dispatch_with_memory(tag: &str, mem: &Arc<Mutex<Memory>>) -> Option
         return None;
     }
     let name = parts[0].as_str();
+    match name {
+        "memory_search" | "memory_store" | "memory_link" => {
+            audit(name, tag, "executed");
+            crate::telemetry::log_tool_dispatch(name, "ok");
+        }
+        _ => {}
+    }
     match name {
         "memory_search" => {
             let query = parts.get(1).map(String::as_str).unwrap_or("");
@@ -1277,11 +1317,7 @@ mod tests {
     #[test]
     fn test_dispatch_file_ops() {
         let path = "/tmp/momentum_test_file.txt";
-        assert!(
-            dispatch(&format!("[TOOL: write_file \"{path}\" \"hello momentum\"]"))
-                .unwrap()
-                .is_success()
-        );
+        std::fs::write(path, "hello momentum").unwrap();
         assert_eq!(
             dispatch(&format!("[TOOL: read_file \"{path}\" 0]"))
                 .unwrap()
@@ -1294,6 +1330,9 @@ mod tests {
                 .output
                 .contains("Line 1")
         );
+        let write = dispatch(&format!("[TOOL: write_file \"{path}\" \"hello momentum\"]")).unwrap();
+        assert!(write.error.is_some());
+        assert!(write.output.contains("Action queued for approval:"));
         let _ = std::fs::remove_file(path);
     }
 }
