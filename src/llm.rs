@@ -12,7 +12,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 
 
-const GPU_RESERVE_MB: usize = 192;
+const GPU_RESERVE_MB: usize = 64;
 
 static PREFETCH_TASK: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
 
@@ -224,11 +224,93 @@ pub fn async_prewarm_server() {
     }
 }
 
-pub fn complete(prompt: &str, max_tokens: u32) -> anyhow::Result<String> {
-    complete_stream(prompt, max_tokens, |_| {})
+pub fn complete_with_llama(
+    profile: &ModelProfile,
+    prompt: &str,
+    max_tokens: u32,
+    mut on_token: impl FnMut(&str),
+) -> anyhow::Result<String> {
+    use std::process::{Command, Stdio};
+    use std::io::{BufRead, BufReader};
+
+    let model_path = crate::config::resolve_blob(profile)
+        .ok_or_else(|| anyhow::anyhow!("Model not found"))?;
+    
+    let mut child = Command::new(crate::config::llama_cli_path())
+        .env("LD_LIBRARY_PATH", crate::config::llama_bin_dir())
+        .args([
+            "-m", &model_path,
+            "-c", &crate::config::llama_ctx(profile).to_string(),
+            "-n", &max_tokens.to_string(),
+            "-t", &crate::config::llama_threads().to_string(),
+            "-tb", &crate::config::llama_threads().to_string(),
+            "-b", &crate::config::llama_batch().to_string(),
+            "-ub", &crate::config::llama_batch().to_string(),
+            "-ngl", &crate::config::llama_ngl().to_string(),
+            "--temp", "0.6",
+            "--top-p", "0.9",
+            "--top-k", "40",
+            "--repeat-penalty", "1.15",
+            "--repeat-last-n", "128",
+            "--no-conversation",
+            "-p", prompt,
+            "--no-display-prompt"
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    let reader = BufReader::new(child.stdout.take().unwrap());
+    let mut output = String::new();
+    for line in reader.lines() {
+        if let Ok(l) = line {
+            on_token(&l);
+            output.push_str(&l);
+        }
+    }
+    child.wait()?;
+    Ok(output)
 }
 
+
+#[allow(dead_code)]
+pub fn complete(prompt: &str, max_tokens: u32) -> anyhow::Result<String> {
+    let profile = MODEL_PROFILES.first().unwrap();
+    complete_with_profile(profile, prompt, max_tokens)
+}
+
+pub fn complete_with_profile(profile: &ModelProfile, prompt: &str, max_tokens: u32) -> anyhow::Result<String> {
+    complete_stream_with_profile(profile, prompt, max_tokens, |_| {})
+}
+
+#[allow(dead_code)]
 pub fn complete_stream(
+    prompt: &str,
+    max_tokens: u32,
+    on_token: impl FnMut(&str),
+) -> anyhow::Result<String> {
+    let profile = MODEL_PROFILES.first().unwrap();
+    complete_stream_with_profile(profile, prompt, max_tokens, on_token)
+}
+
+pub fn complete_stream_with_profile(
+    profile: &ModelProfile,
+    prompt: &str,
+    max_tokens: u32,
+    mut on_token: impl FnMut(&str),
+) -> anyhow::Result<String> {
+    if crate::config::llama_cli_path().exists() {
+        match complete_with_llama(profile, prompt, max_tokens, &mut on_token) {
+            Ok(output) => return Ok(output),
+            Err(e) => {
+                eprintln!("llama-cli failed, falling back to infer-rs: {}", e);
+            }
+        }
+    }
+    complete_stream_inferrs(prompt, max_tokens, on_token)
+}
+
+pub fn complete_stream_inferrs(
     prompt: &str,
     max_tokens: u32,
     mut on_token: impl FnMut(&str),
@@ -347,9 +429,10 @@ pub fn complete_batch(
     prompts: &[String],
     max_tokens: u32,
 ) -> anyhow::Result<Vec<String>> {
+    let profile = MODEL_PROFILES.first().unwrap();
     let mut outputs = Vec::with_capacity(prompts.len());
     for prompt in prompts {
-        outputs.push(complete(prompt, max_tokens)?);
+        outputs.push(complete_with_profile(profile, prompt, max_tokens)?);
     }
     Ok(outputs)
 }
@@ -359,10 +442,11 @@ pub fn complete_stream_batch(
     max_tokens: u32,
     mut on_token: impl FnMut(&str),
 ) -> anyhow::Result<Vec<String>> {
+    let profile = MODEL_PROFILES.first().unwrap();
     let mut outputs = Vec::with_capacity(prompts.len());
     for prompt in prompts {
         let prompt_copy = prompt.clone();
-        outputs.push(complete_stream(&prompt_copy, max_tokens, |piece| {
+        outputs.push(complete_stream_with_profile(profile, &prompt_copy, max_tokens, |piece| {
             on_token(piece);
         })?);
     }
@@ -379,7 +463,8 @@ mod tests {
         let runtime = InferenceRuntime::start().expect("configured default GGUF model should load");
         assert!(runtime.gpu_status.loaded_layers <= runtime.gpu_status.target_layers);
         assert!(runtime.gpu_status.device_name.is_some(), "expected CUDA device to be detected");
-        let output = complete("Hi", 1).expect("single-token completion should finish");
+        let profile = MODEL_PROFILES.first().unwrap();
+        let output = complete_with_profile(profile, "Hi", 1).expect("single-token completion should finish");
         assert!(!output.is_empty(), "inference returned no token");
     }
 }

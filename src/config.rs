@@ -1,8 +1,8 @@
 // config.rs - All constants and paths in one place
 // Tuned for i7-8550U (15W TDP, 8GB RAM) + GeForce MX150 (2GB VRAM, CUDA 6.1)
 
-// Inference is handled in-process by the local Rust engine. CUDA is loaded
-// dynamically from libcuda.so.1 and compiled from embedded PTX by the driver.
+// Inference uses tuned local llama-cli with AVX2 OpenMP multithreading for generation.
+// infer-rs remains available for mean token embeddings and fallback.
 
 // ── Model profiles ────────────────────────────────────────────────────────────
 // Each entry: (display_name, blob_sha_fragment, max_gpu_layers, ctx_size, ram_warn_gb, description)
@@ -190,6 +190,37 @@ pub fn whisper_cli_path() -> PathBuf {
         .unwrap_or_else(|| ai_projects_root().join("whisper.cpp/build/bin/whisper-cli"))
 }
 
+pub fn llama_bin_dir() -> PathBuf {
+    std::env::var_os("MOMENTUM_LLAMA_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/home/mehtculos-xfemag/AI_project/llama-bin"))
+}
+
+pub fn llama_cli_path() -> PathBuf {
+    llama_bin_dir().join("llama-cli")
+}
+
+pub fn llama_threads() -> u32 {
+    std::env::var("MOMENTUM_LLAMA_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(4)
+}
+
+pub fn llama_ngl() -> u32 {
+    0
+}
+
+pub fn llama_ctx(profile: &ModelProfile) -> u32 {
+    let cap = if profile.ram_warn_gb >= 3.5 { 1024 } else { 2048 };
+    profile.ctx_size.min(cap).max(1)
+}
+
+pub fn llama_batch() -> u32 {
+    256
+}
+
 pub fn whisper_model_path() -> PathBuf {
     std::env::var_os("MOMENTUM_WHISPER_MODEL")
         .map(PathBuf::from)
@@ -350,9 +381,6 @@ MEMORY:
 AGENT LOOP PATTERN (read screen → think → act → verify):
   screen_read → decide what to do → find_and_click / shell / desktop_action → screen_read to verify"#;
 
-// Combined — used in tests and legacy call sites only.
-pub const PERSONA: &str = "You are Ghostwater, a direct and concise AI companion running locally on limited hardware.\nStay brief. No filler. Match the user's tone.\nIf a task needs a tool or memory op, output the tag alone on its own line.\nTOOL SYNTAX:\n[TOOL: search_web \"query\"] | [TOOL: read_file \"/path\"] | [TOOL: write_file \"/path\" \"content\"]\n[TOOL: create_file \"/path\" \"content\"] | [TOOL: append_to_file \"/path\" \"content\"]\n[TOOL: list_directory \"/path\"] | [TOOL: search_in_file \"/path\" \"pattern\"]\n[TOOL: open_url \"https://...\"] | [TOOL: run_command \"cmd\"] | [TOOL: kill_process \"1234\"]\nMEMORY: [TOOL: memory_search \"q\"] | [TOOL: memory_add \"label\" \"type\" \"content\"] | [TOOL: memory_update \"id\" \"\" \"content\"] | [TOOL: memory_hide \"id\"] | [TOOL: memory_get \"q\"]";
-
 /// Returns true when the query likely needs a tool or memory op.
 /// Pure string scan — zero allocations on the hot path.
 pub fn needs_tools(query: &str) -> bool {
@@ -455,4 +483,12 @@ pub fn needs_tools(query: &str) -> bool {
                 .all(|(a, b)| a.to_ascii_lowercase() == *b)
         })
     })
+}
+
+pub fn format_prompt(profile: &ModelProfile, system: &str, history: &str, user: &str) -> String {
+    if profile.name.to_lowercase().contains("mistral") {
+        format!("[INST] System: {}\n\nHistory:\n{}\n\nUser: {} [/INST]", system, history, user)
+    } else {
+        format!("<|im_start|>system\n{}\n<|im_end|>\n{}\n<|im_start|>user\n{}\n<|im_end|>\n<|im_start|>assistant\n", system, history, user)
+    }
 }

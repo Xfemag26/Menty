@@ -21,9 +21,10 @@ impl ToolResult {
         }
     }
     pub fn err(s: impl Into<String>) -> Self {
+        let msg = s.into();
         Self {
-            output: s.into(),
-            error: Some(ToolError::Unknown("Generic error".into())),
+            output: msg.clone(),
+            error: Some(ToolError::Unknown(msg)),
         }
     }
     pub fn is_success(&self) -> bool {

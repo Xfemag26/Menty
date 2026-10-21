@@ -21,7 +21,7 @@ use config::*;
 use guardian::{
     format_hw_state_for_prompt, new_hw_cache, start_guardian, GuardianAlert, HwCache, PerfMode,
 };
-use llm::{complete, complete_stream, GpuStatus, InferenceRuntime};
+use llm::{complete_stream_with_profile, GpuStatus, InferenceRuntime};
 use memory::Memory;
 use reflection::{new_activity_tracker, record_activity, start_reflection_loop, LastActivityTs};
 use tools::dispatch_with_memory;
@@ -357,8 +357,8 @@ impl MomentumApp {
         let prompt_input = text.clone();
         let tx = self.chat_tx.clone();
         let hw_cache_clone = self.hw_cache.clone();
-        // Snapshot active profile's token budget — avoids borrowing self inside async block
-        let active_max_tokens = config::MODEL_PROFILES[self.active_model_idx].max_tokens;
+        let active_profile_idx = self.active_model_idx;
+        let active_max_tokens = config::MODEL_PROFILES[active_profile_idx].max_tokens;
         let history: Vec<_> = self
             .messages
             .iter()
@@ -419,12 +419,9 @@ impl MomentumApp {
             } else {
                 PERSONA_CORE.to_string()
             };
-            // Fix #3: history goes as proper im_start turns BEFORE the current user turn,
-            // not stuffed inside the user field.
-            let prompt = format!(
-                "<|im_start|>system\n{}\n{}\n{}\n\nVerified Context:\n{}\n<|im_end|>\n{}\n<|im_start|>user\n{}\n<|im_end|>\n<|im_start|>assistant\n",
-                persona_block, ram_state, env_hint, context, history_turns, prompt_input
-            );
+            let profile = &config::MODEL_PROFILES[active_profile_idx];
+            let system_part = format!("{}\n{}\n{}\n\nVerified Context:\n{}", persona_block, ram_state, env_hint, context);
+            let prompt = config::format_prompt(profile, &system_part, &history_turns, &prompt_input);
 
             // Seed an empty assistant bubble so delta messages grow it.
             let _ = tx.send(ChatMessage {
@@ -433,7 +430,7 @@ impl MomentumApp {
                 time: Local::now().format("%H:%M").to_string(),
             });
             let tx_stream = tx.clone();
-            let raw_response = complete_stream(&prompt, active_max_tokens, |piece| {
+            let raw_response = complete_stream_with_profile(profile, &prompt, active_max_tokens, |piece| {
                 let _ = tx_stream.send(ChatMessage {
                     role: "delta".into(),
                     content: piece.to_string(),
@@ -515,11 +512,10 @@ impl MomentumApp {
                 }
 
                 // Re-infer with results + history so the model keeps context across tool rounds
-                let follow_up = format!(
-                    "<|im_start|>system\n{}\n{}\nTool results (latest):{}\n<|im_end|>\n{}\n<|im_start|>user\n{}\n<|im_end|>\n<|im_start|>assistant\n",
-                    PERSONA_CORE, ram_state, accumulated_tool_ctx, history_turns, prompt_input
-                );
-                current_response = complete(&follow_up, active_max_tokens)
+                let profile = &config::MODEL_PROFILES[active_profile_idx];
+                let sys_follow = format!("{}\n{}\nTool results (latest):{}", PERSONA_CORE, ram_state, accumulated_tool_ctx);
+                let follow_up = config::format_prompt(profile, &sys_follow, &history_turns, &prompt_input);
+                current_response = llm::complete_with_profile(profile, &follow_up, active_max_tokens)
                     .unwrap_or_else(|e| format!("Error: {e}"));
             }
 
@@ -1047,26 +1043,38 @@ fn main() -> anyhow::Result<()> {
         }
 
         let _ = telemetry::init();
-        let _runtime = if let Ok(idx) = profile_arg.parse::<usize>() {
+        let _runtime = if config::llama_cli_path().exists() {
+            None
+        } else if let Ok(idx) = profile_arg.parse::<usize>() {
             if idx < config::MODEL_PROFILES.len() {
                 let profile = &config::MODEL_PROFILES[idx];
-                InferenceRuntime::start_with_profile(profile)?
+                Some(InferenceRuntime::start_with_profile(profile)?)
             } else {
-                InferenceRuntime::start()?
+                Some(InferenceRuntime::start()?)
             }
         } else {
             if let Some(pos) = config::MODEL_PROFILES.iter().position(|pf| pf.name.to_lowercase().contains(&profile_arg.to_lowercase())) {
                 let profile = &config::MODEL_PROFILES[pos];
-                InferenceRuntime::start_with_profile(profile)?
+                Some(InferenceRuntime::start_with_profile(profile)?)
             } else {
-                InferenceRuntime::start()?
+                Some(InferenceRuntime::start()?)
             }
         };
 
         let prompt = std::fs::read_to_string(prompt_file).unwrap_or_else(|_| "Hello momentum".to_string());
         let start = std::time::Instant::now();
         let mut token_count = 0usize;
-        let out = llm::complete_stream(&prompt, 256, |piece| {
+        let bench_profile = if let Ok(idx) = profile_arg.parse::<usize>() {
+            if idx < config::MODEL_PROFILES.len() { &config::MODEL_PROFILES[idx] } else { &config::MODEL_PROFILES[0] }
+        } else {
+            if let Some(pos) = config::MODEL_PROFILES.iter().position(|pf| pf.name.to_lowercase().contains(&profile_arg.to_lowercase())) {
+                &config::MODEL_PROFILES[pos]
+            } else {
+                &config::MODEL_PROFILES[0]
+            }
+        };
+        let formatted_prompt = config::format_prompt(bench_profile, "You are a helpful assistant.", "", &prompt);
+        let out = llm::complete_stream_with_profile(bench_profile, &formatted_prompt, 256, |piece| {
             token_count += piece.chars().count();
         })?;
         let elapsed = start.elapsed();
